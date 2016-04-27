@@ -1,16 +1,18 @@
 {
   "name": "segment-appender",
   "version": "1.0.0",
-  "description": "creates druid segment append tasks",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
+  "bin": "./segment-appender.js",
+  "description": "Creates druid segment append tasks",
+  "main": "segment-appender.js",
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
+    "bluebird": "^3.3.5",
+    "bytes": "^2.3.0",
     "co": "^4.6.0",
     "co-request": "^1.0.0",
-    "minimist": "^1.2.0"
+    "commander": "^2.9.0",
+    "lodash": "^4.11.1",
+    "winston": "^2.2.0"
   }
 }
