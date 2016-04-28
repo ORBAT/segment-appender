@@ -43,7 +43,7 @@ commander
   .option("-d, --data-source <dataSource>", "Druid data source to append (required)")
   .option("-r, --max-concurrent-reqs <n>", "Maximum concurrent requests [10]", 10)
   .option("-x, --max-segment-size <val>", "Maximum segment size [900MB]", "900MB")
-  .option("-m, --min-segment-size <val>", "Minimum segment size: smaller segments will not be created [500MB]", "500MB")
+  .option("-m, --min-segment-size <val>", "Minimum segment size: smaller segments will not be created [400MB]", "400MB")
   .option("-n, --dry-run", "Don't actually create the task")
   .option("-v, --verbose", "Be verbose")
   .parse(process.argv)
