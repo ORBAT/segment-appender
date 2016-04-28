@@ -10,9 +10,9 @@
     "bluebird": "^3.3.5",
     "bytes": "^2.3.0",
     "co": "^4.6.0",
-    "co-request": "^1.0.0",
     "commander": "^2.9.0",
     "lodash": "^4.11.1",
+    "requestretry": "^1.6.0",
     "winston": "^2.2.0"
   }
 }
