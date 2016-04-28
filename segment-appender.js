@@ -25,6 +25,14 @@ function collect(val, memo) {
   return memo;
 }
 
+logger.remove(logger.transports.Console);
+logger.add(logger.transports.Console, {
+  timestamp: function () {
+    return new Date().toISOString();
+  }
+  , stderrLevels: ["debug", "info", "warn", "error"]
+});
+
 //noinspection JSCheckFunctionSignatures
 commander
   .version("0.0.1")
@@ -35,7 +43,7 @@ commander
   .option("-d, --data-source <dataSource>", "Druid data source to append (required)")
   .option("-r, --max-concurrent-reqs <n>", "Maximum concurrent requests [10]", 10)
   .option("-x, --max-segment-size <val>", "Maximum segment size [900MB]", "900MB")
-  .option("-m, --min-segment-size <val>", "Minimum segment size: smaller resulting segments will not be created [500MB]", "500MB")
+  .option("-m, --min-segment-size <val>", "Minimum segment size: smaller segments will not be created [500MB]", "500MB")
   .option("-n, --dry-run", "Don't actually create the task")
   .option("-v, --verbose", "Be verbose")
   .parse(process.argv)
@@ -147,8 +155,9 @@ function submitTasks(tasks, overlord) {
         , retryStrategy: request.RetryStrategies.HTTPOrNetworkError
       }))
       .get("body")
-      .then(JSON.parse)
-      .catch(e => logger.error("error when submitting indexing task", {taskId: task.id, err: e}))
+      .catch(e => {
+        logger.error("error when submitting indexing task", {taskId: task.id, err: e, task: JSON.stringify(task, null, 2)})
+      })
       ;
   };
 
@@ -187,7 +196,7 @@ co(function*() {
   let chunkOb = fullMetadatas.reduce((acc, metadata) => {
     const shardType = _.get(metadata, "metadata.shardSpec.type");
     if (shardType != "none") {
-      logger.info("skipping sharded segment", {segmentId: metadata.id, shardSpec: JSON.stringify(shardType)});
+      logger.info("skipping sharded segment", {segmentId: metadata.id, shardSpec: JSON.stringify(_.get(metadata, "metadata.shardSpec"))});
       if(acc.currSize != 0) {
         logger.info("terminating chunk early due to sharded segment");
         endChunk(acc);
@@ -223,7 +232,10 @@ co(function*() {
   }
 
   let submits = yield submitTasks(tasks, overlordAddr);
+
   logger.info("tasks submitted");
+
+  console.log(JSON.stringify(submits));
 
 }).catch((e) => {
   logger.error("Uncaught error", {err: e.toString()});
