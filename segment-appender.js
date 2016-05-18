@@ -67,7 +67,7 @@ if(!(brokerAddr && coordinatorAddr && dataSource && intervals.length && overlord
 
 if(commander.verbose) logger.level = "debug";
 
-logger.info("Starting up", {coordinatorAddr: coordinatorAddr, brokerAddr: brokerAddr, overlordAddr: overlordAddr, noRun: dryRun, dataSource: dataSource, maxConcurrent: maxConcurrent, maxSegmentSize: formatBytes(maxSegmentSize), minSegmentSize: formatBytes(minSegmentSize)});
+logger.info("Starting up", {coordinatorAddr: coordinatorAddr, brokerAddr: brokerAddr, overlordAddr: overlordAddr, dryRun: dryRun, dataSource: dataSource, maxConcurrent: maxConcurrent, maxSegmentSize: formatBytes(maxSegmentSize), minSegmentSize: formatBytes(minSegmentSize)});
 
 const promiseFactory = resolver => new Promise(resolver);
 
@@ -85,7 +85,7 @@ const getBasicMetadata = co.wrap(function* getBasicMetadata(query, broker) {
       , retryStrategy: request.RetryStrategies.HTTPOrNetworkError
     });
   } catch (e) {
-    logger.error("error fetching basic metadata", {"err": e});
+    logger.error("error fetching basic metadata", {err: e.toString()});
     process.exit(EXIT_REQUEST_ERROR);
   }
   logger.debug("got response to metadata query", {body: resp.body});
@@ -109,6 +109,11 @@ const getFullMetadata = co.wrap(function* getFullMetadata(basicMetadata, dataSou
 
   let fetchSegment = segment => {
     logger.debug("getting full metadata", {"segmentId": segment.id});
+    if(segment.id == "merged") {
+      logger.info("not fetching metadata for 'merged' segment");
+      return _.assign(segment, {metadata: {size: 0}});
+    }
+
     return Promise.props(_.assign(segment, {
       metadata: Promise.resolve(
         request({
@@ -123,7 +128,7 @@ const getFullMetadata = co.wrap(function* getFullMetadata(basicMetadata, dataSou
   };
 
   let fullMetadata = yield Promise.map(basicMetadata, fetchSegment, {concurrency: maxConcurrent}).catch(e => {
-    logger.error("error fetching full metadata", {"err": e});
+    logger.error("error fetching full metadata", {err: e.toString()});
     process.exit(EXIT_REQUEST_ERROR);
   });
 
@@ -145,7 +150,7 @@ function toIndexingTask(dataSource, metadatas, index) {
 
 function submitTasks(tasks, overlord) {
   let submitTask = task => {
-    logger.info("submitting task", {"taskId": task.id, "nSegments": task.segments.length, overlordAddr: overlordAddr});
+    logger.info("submitting task", {"taskId": task.id, "nSegments": task.segments.length, size: formatBytes(sizeOf(task.segments)), overlordAddr: overlordAddr});
     return Promise.resolve(request({
         uri: `http://${overlord}/druid/indexer/v1/task`
         , promiseFactory: promiseFactory
@@ -156,7 +161,7 @@ function submitTasks(tasks, overlord) {
       }))
       .get("body")
       .catch(e => {
-        logger.error("error when submitting indexing task", {taskId: task.id, err: e, task: JSON.stringify(task, null, 2)})
+        logger.error("error when submitting indexing task", {taskId: task.id, err: e.toString(), task: JSON.stringify(task, null, 2)})
       })
       ;
   };
@@ -172,7 +177,7 @@ co(function*() {
     , "toInclude": {"type": "none"}
   };
 
-  let basicMetadata = yield getBasicMetadata(metadataQuery, brokerAddr);
+  let basicMetadata = (yield getBasicMetadata(metadataQuery, brokerAddr));
 
   if(!basicMetadata.length) {
     logger.error("No segments found for this source and interval", {"intervals": intervals, "dataSource": dataSource});
@@ -182,41 +187,64 @@ co(function*() {
 
   let fullMetadatas = yield getFullMetadata(basicMetadata, dataSource, coordinatorAddr);
 
-  let endChunk = acc => {
-    if(acc.currSize < minSegmentSize) {
-      logger.info("segment would be too small, skipping", {size: formatBytes(acc.currSize), minSegmentSize: formatBytes(minSegmentSize), nSegments: acc.currChunk.length});
-      return;
+  let getMetas = metadatas => _.map(metadatas, "metadata");
+  let sizeOfChunk = chunk => sizeOf(getMetas(chunk));
+
+
+  let endChunk = (acc, metadata) => {
+    if(acc.currBytes < minSegmentSize || acc.currChunk.length == 1) {
+      logger.info("chunk would be too small, skipping", {size: formatBytes(acc.currBytes), minSegmentSize: formatBytes(minSegmentSize), nSegments: acc.currChunk.length});
+    } else {
+      logger.debug("created new chunk", {chunkLength: acc.currChunk.length, chunkBytes: formatBytes(acc.currBytes)});
+      acc.chunks.push(acc.currChunk);
     }
-    logger.debug("created new chunk", {chunkSize: formatBytes(acc.currSize)});
-    acc.chunks.push(acc.currChunk);
+
     acc.currChunk = [];
-    acc.currSize = 0;
+    acc.currBytes = 0;
+    if(metadata && metadata.metadata.size > 0 && metadata.id != "merged") {
+      acc.currChunk.push(metadata.metadata);
+      acc.currBytes += metadata.metadata.size;
+    }
   };
 
   let chunkOb = fullMetadatas.reduce((acc, metadata) => {
     const shardType = _.get(metadata, "metadata.shardSpec.type");
     if (shardType != "none") {
-      logger.info("skipping sharded segment", {segmentId: metadata.id, shardSpec: JSON.stringify(_.get(metadata, "metadata.shardSpec"))});
-      if(acc.currSize != 0) {
+      logger.info("skipping segment with wrong shardSpec", {segmentId: metadata.id, shardSpec: JSON.stringify(_.get(metadata, "metadata.shardSpec"))});
+      if(acc.currBytes != 0) {
         logger.info("terminating chunk early due to sharded segment");
         endChunk(acc);
       }
       return acc;
     }
 
-    if (acc.currSize + metadata.metadata.size <= maxSegmentSize) {
+    if(metadata.id == "merged" || metadata.metadata.size == 0) {
+      logger.info("Found weird segment with id 'merged' or size 0, skipping", {segmentId: metadata.id,
+        segmentSize: formatBytes(metadata.metadata.size)});
+
+      if(acc.currBytes != 0) {
+        logger.info("terminating chunk early due to 'merged' segment");
+        endChunk(acc, metadata);
+      }
+
+      return acc;
+    }
+
+
+    if (acc.currBytes + metadata.metadata.size <= maxSegmentSize) {
       acc.currChunk.push(metadata.metadata);
-      acc.currSize += metadata.metadata.size;
+      acc.currBytes += metadata.metadata.size;
     } else {
-      endChunk(acc);
+      endChunk(acc, metadata);
     }
 
     return acc;
-  }, {currSize: 0, currChunk: [], chunks: []});
+  }, {currBytes: 0, currChunk: [], chunks: []});
 
-  if(chunkOb.currSize > minSegmentSize) {
-    logger.info("leftover segment would be too small, skipping", {size: formatBytes(chunkOb.currSize), nSegments: chunkOb.currChunk.length});
+  if(chunkOb.currBytes > minSegmentSize) {
     chunkOb.chunks.push(chunkOb.currChunk);
+  } else if (chunkOb.currBytes > 0){
+    logger.info("leftover segment would be too small, skipping", {size: formatBytes(chunkOb.currBytes), nSegments: chunkOb.currChunk.length});
   }
 
   let chunks = chunkOb.chunks;
@@ -224,10 +252,9 @@ co(function*() {
   let tasks = chunks.map(_.partial(toIndexingTask, dataSource));
   logger.info("tasks created", {nTasks: tasks.length});
 
-  _.each(tasks, task => logger.info({taskId: task.id, newSize: formatBytes(sizeOf(task.segments))}));
-
   if(dryRun) {
-    logger.info(JSON.stringify(tasks, null, 2));
+    _.each(tasks, task => logger.info({taskId: task.id, nSegments: task.segments.length, newSize: formatBytes(sizeOf(task.segments))}));
+    // console.log(JSON.stringify(tasks, null, 2));
     process.exit(0);
   }
 
